@@ -1,0 +1,168 @@
+---
+title: "hw6"
+author: "Baode Gao"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(modelr)
+library(mgcv)
+library(fastDummies)
+knitr::opts_chunk$set(
+  fig.width = 6,
+  fig.asp = .6,
+  out.width = "90%"
+)
+theme_set(theme_minimal() + theme(legend.position = "bottom"))
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+
+
+```
+
+# Problem 1
+
+### Read and clean data
+```{r}
+bw_df = 
+  read.csv("data/birthweight.csv") %>% 
+  janitor::clean_names() %>% 
+  drop_na() %>% 
+  mutate(
+    babysex = factor(babysex),
+    frace = factor(frace),
+    mrace = factor(mrace),
+    malform = factor(malform)
+  ) 
+
+knitr::kable(head(bw_df))
+
+```
+
+### Modeling and residuals plot
+
+```{r results='hide'}
+bw_df = dummy_cols(bw_df, select_columns = c('babysex', 'frace', 'malform', 'mrace'))
+mlr = lm(bwt ~ ., data = bw_df) %>% 
+  step(direction = 'both')
+```
+
+The model was selected by stepwise regression. In each step, a variable was added and a variable was removed, if the AIC would decrease.
+
+
+```{r}
+bw_df %>% 
+  add_residuals(mlr) %>% 
+  add_predictions(mlr) %>% 
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.6) +
+  xlab("Fitted Values") +
+  ylab("Residuals")
+```
+
+As shown in the plot, residual values bounced around 0 and they were  basically symmetrical.
+
+### Compare to two others
+```{r warning=FALSE}
+model1 = lm(bwt ~ blength + gaweeks, data = bw_df)
+summary(model1)
+model2 = lm(bwt ~ bhead * blength * babysex, data = bw_df)
+summary(model2)
+
+cv_df = 
+  crossv_mc(bw_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  ) %>% 
+  mutate(
+    mlr = map(train, ~lm(bwt ~ babysex_1 + bhead + blength + delwt + fincome +
+                           gaweeks + mheight + mrace_1 + mrace_2 + mrace_3 +
+                           parity + ppwt + smoken, data = .x)),
+    model1 = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    model2 = map(train, ~lm(bwt ~ bhead * blength * babysex, data = .x))) %>% 
+  mutate(
+    rmse_mlr = map2_dbl(mlr, test, ~rmse(model = .x, data = .y)),
+    rmse_model1 = map2_dbl(model1, test, ~rmse(model = .x, data = .y)),
+    rmse_model2 = map2_dbl(model2, test, ~rmse(model = .x, data = .y)))
+
+cv_df %>% 
+  select(starts_with('rmse')) %>% 
+  pivot_longer(
+    rmse_mlr:rmse_model2,
+    names_to = 'model',
+    values_to = 'rmse', 
+    names_prefix = 'rmse_'
+  ) %>% 
+  ggplot(aes(x = model, y = rmse)) +
+  geom_boxplot()
+```
+
+
+As shown in the box plots, mlr had the lowest rmse and model1 had the highest rmse.
+
+# Problem 2
+```{r echo=FALSE,results='hide',message=FALSE}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+### bootstrapping 
+
+```{r}
+slm = lm(tmax ~ tmin, data = weather_df)
+
+slm_df = 
+  slm %>% 
+  broom::tidy()
+logbeta = log(pull(filter(slm_df, term == '(Intercept)'), estimate) * pull(filter(slm_df, term == 'tmin'), estimate))
+R2 = slm %>% 
+    broom::glance() %>% 
+    pull(r.squared)
+
+weather_sp = weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(
+    models = map(strap, ~ lm(tmax ~ tmin, data = .x)),
+    estimates = map(models, broom::tidy),
+    glance = map(models, broom::glance)) %>% 
+    unnest(glance, estimates) %>% 
+    select(.id, term, estimate, r.squared) %>% 
+
+    mutate(term = ifelse(term == '(Intercept)', 'beta0', 'beta1')) %>% 
+    pivot_wider(names_from = term, 
+                values_from = estimate) %>% 
+    mutate(
+      logbeta = log(beta0 * beta1)
+    )
+```
+
+# Get info
+
+```{r}
+weather_sp %>% 
+  ggplot(aes(x = r.squared)) + 
+  geom_density()
+weather_sp %>% 
+  ggplot(aes(x = logbeta)) + 
+  geom_density() 
+quantile(pull(weather_sp,r.squared), c(0.025, 0.975))
+quantile(pull(weather_sp,logbeta), c(0.025, 0.975))
+```
+
+Both $r^2$ and logbeta are basically normally distributed.The mean of $r^2$ is around 0.913 and the expectation of logbeta is around 2.015.
+
